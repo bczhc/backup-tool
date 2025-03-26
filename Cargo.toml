@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4.5.32", features = ["derive"] }
+anyhow = "1.0.97"
+blake3 = "1.7.0"
+once_cell = "1.21.1"
+jwalk = "0.8.1"
+log = "0.4.27"
+fern = { version = "0.7.1", features = ["colored"] }
+filetime = "0.2.25"
+humantime = "2.2.0"
+colored = "3.0.0"
+bytesize = "2.0.1"
+hex = "0.4.3"
