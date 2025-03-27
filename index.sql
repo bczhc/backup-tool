@@ -8,7 +8,9 @@ create table if not exists `index`
 
 create table if not exists chunk
 (
-    file_hash blob,
-    -- comma-separated list of chunk digests
-    splits    text
+    file_hash  blob,
+    chunk_hash blob,
+    bak_n      integer,
+    offset     integer,
+    size       integer
 )

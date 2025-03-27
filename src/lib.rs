@@ -112,8 +112,9 @@ impl Deref for FileNanoTime {
 }
 
 pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
+    let base_dir = dir.as_ref();
     let mut collected = Vec::new();
-    let walk = jwalk::WalkDir::new(dir).skip_hidden(false);
+    let walk = jwalk::WalkDir::new(base_dir).skip_hidden(false);
     for x in walk {
         let e = x?;
         // only accept regular files
@@ -122,8 +123,9 @@ pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
         }
         let metadata = e.metadata()?;
         let mtime = FileTime::from_last_modification_time(&metadata);
+        let relative_path = pathdiff::diff_paths(e.path(), base_dir).expect("Unexpected: cannot get a relative path");
         let entry = FileEntry {
-            path: e.path(),
+            path: relative_path,
             size: metadata.len(),
             mtime: mtime.into(),
         };

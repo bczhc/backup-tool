@@ -10,8 +10,11 @@ pub struct IndexRow {
 
 pub struct ChunkRow {
     pub file_hash: [u8; HASH_SIZE],
-    /// A comma-separated hash list string
-    pub splits: String,
+    pub chunk_hash: [u8; HASH_SIZE],
+    pub bak_n: i32,
+    /// Offset of this chunk in the 'bak' file
+    pub offset: u64,
+    pub size: u64,
 }
 
 pub struct IndexDb {
@@ -47,18 +50,18 @@ impl IndexDb {
         Ok(map.into_iter().transpose_into_fallible().collect()?)
     }
 
-    pub fn select_chunk_all(&self) -> anyhow::Result<Vec<ChunkRow>> {
-        let mut stmt = self
-            .db
-            .prepare_cached("select file_hash, splits from chunk")?;
-        let map = stmt.query_map(params![], |r| {
-            Ok(ChunkRow {
-                file_hash: r.get_unwrap(0),
-                splits: r.get_unwrap(1),
-            })
-        })?;
-        Ok(map.into_iter().transpose_into_fallible().collect()?)
-    }
+    // pub fn select_chunk_all(&self) -> anyhow::Result<Vec<ChunkRow>> {
+    //     let mut stmt = self
+    //         .db
+    //         .prepare_cached("select file_hash, splits from chunk")?;
+    //     let map = stmt.query_map(params![], |r| {
+    //         Ok(ChunkRow {
+    //             file_hash: r.get_unwrap(0),
+    //             splits: r.get_unwrap(1),
+    //         })
+    //     })?;
+    //     Ok(map.into_iter().transpose_into_fallible().collect()?)
+    // }
 }
 
 pub struct IndexDbTx<'a>(pub Transaction<'a>);
@@ -78,10 +81,16 @@ impl<'a> IndexDbTx<'a> {
     }
 
     pub fn insert_chunk_row(&self, row: &ChunkRow) -> anyhow::Result<()> {
-        let mut stmt = self
-            .0
-            .prepare_cached("insert into chunk (file_hash, splits) values (?, ?)")?;
-        stmt.insert(params![row.file_hash, row.splits.as_str()])?;
+        let mut stmt = self.0.prepare_cached(
+            "insert into chunk (file_hash, chunk_hash, bak_n, offset, size) values (?, ?, ?, ?, ?)",
+        )?;
+        stmt.insert(params![
+            row.file_hash,
+            row.chunk_hash,
+            row.bak_n,
+            row.offset,
+            row.size
+        ])?;
         Ok(())
     }
 }
