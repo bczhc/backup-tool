@@ -1,13 +1,14 @@
 #![feature(decl_macro)]
 
-use std::ffi::OsString;
 use blake3::Hasher;
 use bytesize::ByteSize;
+use cfg_if::cfg_if;
 use clap::Parser;
 use colored::Colorize;
 use fern::colors::{Color, ColoredLevelConfig};
 use filetime::FileTime;
 use once_cell::sync::Lazy;
+use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io;
@@ -17,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::SystemTime;
-use cfg_if::cfg_if;
 
 pub mod db;
 
@@ -83,13 +83,25 @@ pub fn configure_log() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub size: u64,
     pub mtime: FileNanoTime,
 }
 
-impl FileEntry {
+impl FileEntry {}
+
+pub struct ChunkInfo {
+    pub hash: Hash,
+    pub bak_n: i32,
+    pub offset: u64,
+    pub size: u64,
+}
+
+pub struct SplitInfo {
+    pub file_hash: Hash,
+    pub chunks: Vec<ChunkInfo>,
 }
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
@@ -123,9 +135,9 @@ pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
         }
         let metadata = e.metadata()?;
         let mtime = FileTime::from_last_modification_time(&metadata);
-        let relative_path = pathdiff::diff_paths(e.path(), base_dir).expect("Unexpected: cannot get a relative path");
+        // let relative_path = pathdiff::diff_paths(e.path(), base_dir).expect("Unexpected: cannot get a relative path");
         let entry = FileEntry {
-            path: relative_path,
+            path: e.path(),
             size: metadata.len(),
             mtime: mtime.into(),
         };
@@ -208,7 +220,7 @@ impl<R: Read> Read for HashReadWrapper<R> {
     }
 }
 
-impl<R: Read +Seek> Seek for HashReadWrapper<R> {
+impl<R: Read + Seek> Seek for HashReadWrapper<R> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
     }
@@ -242,7 +254,7 @@ pub struct Range {
 /// Half of a 32-byte hash is enough.
 const HASH_SIZE: usize = 16;
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Hash([u8; HASH_SIZE]);
 
 impl Deref for Hash {

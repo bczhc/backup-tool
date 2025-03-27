@@ -1,7 +1,7 @@
 use backup_tool::db::{ChunkRow, IndexDb, IndexRow};
 use backup_tool::{
-    chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, CliArgs, FileEntry,
-    Hash, HashReadWrapper, ARGS, BACKUP_SIZE, CHUNK_SIZE,
+    chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, ChunkInfo, CliArgs,
+    FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE, CHUNK_SIZE,
 };
 use clap::Parser;
 use log::info;
@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, io, mem};
 
 fn main() -> anyhow::Result<()> {
@@ -71,7 +71,7 @@ fn differential_backup() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
 
     // back up diff files
-    backup_files(&out_dir, todo!(), diff.into_iter())?;
+    // write_bak_files(&out_dir, todo!(), todo!())?;
     info!("Adding up old index entries...");
     let old_index_map = old_index
         .iter()
@@ -104,23 +104,54 @@ fn initial_backup() -> anyhow::Result<()> {
     let file_count = files.len();
     info!("File count: {file_count}");
 
-    backup_files(&out_dir, &src_dir, files.iter())?;
+    info!("Deduplicating by hash. Please wait...");
+    let mut file_hash_list = Vec::new();
+    let mut unique_list = HashMap::new();
+    for (i, e) in files.iter().enumerate() {
+        info!("[{}/{}] {}", i, file_count, e.path.display());
+        let hash = compute_file_hash(&e.path)?;
+        unique_list.insert(hash, e);
+        file_hash_list.push(hash);
+    }
+    info!("Writing to backup files...");
+    let file_splits =
+        write_bak_files(&out_dir, &src_dir, unique_list.iter().map(|x| (*x.0, *x.1)))?;
+
+    info!("Creating index database...");
+    let db_path = out_dir.join("index.db");
+    if db_path.exists() {
+        fs::remove_file(&db_path)?;
+    }
+    let mut db = IndexDb::new(&db_path)?;
+    let db_tx = db.transaction()?;
+    for x in files.iter().zip(file_hash_list) {
+        db_tx.insert_index_row(&IndexRow {
+            hash: *x.1,
+            entry: x.0.clone(),
+        })?;
+    }
+    for x in file_splits {
+        let file_hash = x.file_hash;
+        for x in x.chunks {
+            db_tx.insert_chunk_row(&ChunkRow {
+                file_hash: *file_hash,
+                bak_n: x.bak_n,
+                chunk_hash: *x.hash,
+                offset: x.offset,
+                size: x.size,
+            })?;
+        }
+    }
+    db_tx.0.commit()?;
+    info!("Done");
     Ok(())
 }
 
-fn backup_files<'a>(
+fn write_bak_files<'a>(
     out_dir: &Path,
     src_dir: &Path,
-    files: impl ExactSizeIterator<Item = &'a FileEntry>,
-) -> anyhow::Result<()> {
-    info!("Creating the index database...");
-    let index_db_path = out_dir.join("index.db");
-    if index_db_path.exists() {
-        fs::remove_file(index_db_path.as_path())?;
-    }
-    let mut db = IndexDb::new(index_db_path)?;
-    let db_tx = db.transaction()?;
-
+    files: impl ExactSizeIterator<Item = (Hash, &'a FileEntry)>,
+) -> anyhow::Result<Vec<SplitInfo>> {
     let file_count = files.len();
     let mut file_chunks_hash = vec![Vec::<Hash>::new(); file_count];
 
@@ -128,21 +159,28 @@ fn backup_files<'a>(
     let mut bak_total_size = 0_u64;
     // chunk offset of the current 'bak' file in index.txt
     let mut chunk_offset = 0_u64;
-    // format: chunk-hash, bak_n, offset, size
-    let mut chunks_index = Vec::new();
     let create_bak_file = |bak_n: i32| -> anyhow::Result<BufWriter<File>> {
         let bak_file = out_dir.join(format!("bak{bak_n}"));
         Ok(BufWriter::new(File::create(&bak_file)?))
     };
     let mut bak_output = create_bak_file(bak_n)?;
 
+    let mut split_info_list = Vec::new();
+
     for (i, e) in files.into_iter().enumerate() {
-        let chunks = chunks_ranges(e.size);
-        let mut reader = HashReadWrapper::new(BufReader::new(File::open(src_dir.join(&e.path))?));
+        let file_size = e.1.size;
+        let file_path = e.1.path.as_path();
+        split_info_list.push(SplitInfo {
+            file_hash: e.0,
+            chunks: Default::default(),
+        });
+
+        let chunks = chunks_ranges(file_size);
+        let mut reader = BufReader::new(File::open(src_dir.join(file_path))?);
         for (chunk_n, r) in chunks.iter().enumerate() {
             info!(
                 "Write file [{i}/{file_count}] {} chunk #{}",
-                e.path.display(),
+                file_path.display(),
                 chunk_n + 1
             );
 
@@ -163,41 +201,20 @@ fn backup_files<'a>(
             let chunk_hash = hash_wrapper.finalize();
             file_chunks_hash[i].push(chunk_hash);
 
-            chunks_index.push((chunk_hash, bak_n, chunk_offset, r.size));
+            split_info_list[i].chunks.push(ChunkInfo {
+                hash: chunk_hash,
+                bak_n,
+                offset: chunk_offset,
+                size: r.size,
+            });
 
             bak_total_size += r.size;
             chunk_offset += r.size;
         }
-        debug_assert_eq!(reader.stream_position()?, e.size);
-        let full_file_hash = reader.finalize();
-        db_tx.insert_index_row(&IndexRow {
-            entry: FileEntry {
-                path: (&e.path).into(),
-                size: e.size,
-                mtime: e.mtime,
-            },
-            hash: *full_file_hash,
-        })?;
-        let split_list = file_chunks_hash[i]
-            .iter()
-            .map(|x| format!("{x}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        for info in &chunks_index {
-            db_tx.insert_chunk_row(&ChunkRow {
-                file_hash: *full_file_hash,
-                chunk_hash: *info.0,
-                bak_n: info.1,
-                offset: info.2,
-                size: info.3,
-            })?;
-        }
+        debug_assert_eq!(reader.stream_position()?, file_size);
     }
     // flush the last 'bak' file
     bak_output.flush()?;
 
-    info!("Committing index database...");
-    db_tx.0.commit()?;
-
-    Ok(())
+    Ok(split_info_list)
 }
