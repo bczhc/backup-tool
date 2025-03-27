@@ -1,8 +1,10 @@
-use crate::{FileEntry, FileNanoTime, PathBytes, HASH_SIZE};
+use crate::{FileEntry, FileNanoTime, PathBytes, SplitInfo, HASH_SIZE};
 use rusqlite::fallible_iterator::{FallibleIterator, IteratorExt};
 use rusqlite::{params, Connection, Transaction};
+use std::fs;
 use std::path::Path;
 
+#[derive(Debug)]
 pub struct IndexRow {
     pub entry: FileEntry,
     pub hash: [u8; HASH_SIZE],
@@ -22,7 +24,10 @@ pub struct IndexDb {
 }
 
 impl IndexDb {
-    pub fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn new(path: impl AsRef<Path>, delete_old: bool) -> anyhow::Result<Self> {
+        if delete_old && path.as_ref().exists() {
+            fs::remove_file(path.as_ref())?;
+        }
         let db = Connection::open(path)?;
         let sql = include_str!("../index.sql");
         db.execute_batch(sql)?;
@@ -50,18 +55,20 @@ impl IndexDb {
         Ok(map.into_iter().transpose_into_fallible().collect()?)
     }
 
-    // pub fn select_chunk_all(&self) -> anyhow::Result<Vec<ChunkRow>> {
-    //     let mut stmt = self
-    //         .db
-    //         .prepare_cached("select file_hash, splits from chunk")?;
-    //     let map = stmt.query_map(params![], |r| {
-    //         Ok(ChunkRow {
-    //             file_hash: r.get_unwrap(0),
-    //             splits: r.get_unwrap(1),
-    //         })
-    //     })?;
-    //     Ok(map.into_iter().transpose_into_fallible().collect()?)
-    // }
+    pub fn query_index_row_count(&self) -> anyhow::Result<u64> {
+        Ok(self
+            .db
+            .query_row("select count(*) from `index`", params![], |r| {
+                Ok(r.get_unwrap::<_, u64>(0))
+            })?)
+    }
+    pub fn query_chunk_row_count(&self) -> anyhow::Result<u64> {
+        Ok(self
+            .db
+            .query_row("select count(*) from chunk", params![], |r| {
+                Ok(r.get_unwrap::<_, u64>(0))
+            })?)
+    }
 }
 
 pub struct IndexDbTx<'a>(pub Transaction<'a>);
@@ -91,6 +98,22 @@ impl<'a> IndexDbTx<'a> {
             row.offset,
             row.size
         ])?;
+        Ok(())
+    }
+
+    pub fn insert_file_split_info(&self, splits: &[SplitInfo]) -> anyhow::Result<()> {
+        for x in splits {
+            let file_hash = x.file_hash;
+            for x in &x.chunks {
+                self.insert_chunk_row(&ChunkRow {
+                    file_hash: *file_hash,
+                    bak_n: x.bak_n,
+                    chunk_hash: *x.hash,
+                    offset: x.offset,
+                    size: x.size,
+                })?;
+            }
+        }
         Ok(())
     }
 }

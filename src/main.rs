@@ -1,10 +1,11 @@
-use backup_tool::db::{ChunkRow, IndexDb, IndexRow};
+use backup_tool::db::{ChunkRow, IndexDb, IndexDbTx, IndexRow};
 use backup_tool::{
     chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, ChunkInfo, CliArgs,
     FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE, CHUNK_SIZE,
 };
 use clap::Parser;
-use log::info;
+use log::{debug, info};
+use rusqlite::Transaction;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -29,69 +30,85 @@ fn differential_backup() -> anyhow::Result<()> {
     // full scan is still needed
     info!("Indexing files...");
     let files = index_files(&mutex_lock!(ARGS).source_dir)?;
+    info!("File count: {}", files.len());
     let out_dir = mutex_lock!(ARGS).out_dir.clone();
-    let db_path = mutex_lock!(ARGS).ref_index.as_ref().unwrap().clone();
-    let db = IndexDb::new(db_path)?;
+    let src_dir = mutex_lock!(ARGS).source_dir.clone();
+    let ref_db_path = mutex_lock!(ARGS).ref_index.as_ref().unwrap().clone();
+    let ref_db = IndexDb::new(ref_db_path, false)?;
 
     // find out differential files by path, mtime and size
     info!("Reading old index database...");
-    let old_index = db.select_index_all()?;
-    // let old_chunk = Vec::new(); todo!();
+    let old_index = ref_db.select_index_all()?;
+    let mut duplicates: Vec<(&FileEntry, Hash)> = Vec::new();
     info!("Deduplicating by metadata...");
-    let metadata_set = old_index
+    let metadata_map = old_index
         .iter()
-        .map(|x| (x.entry.path.as_path(), x.entry.mtime, x.entry.size))
-        .collect::<HashSet<_>>();
-    let hash_set = old_index.iter().map(|x| &x.hash).collect::<HashSet<_>>();
-    let diff = files
-        .iter()
-        .filter(|&e| !metadata_set.contains(&(e.path.as_path(), e.mtime, e.size)))
-        .collect::<Vec<_>>();
-    info!("Deduplicating diff by hash...");
-    // move may occur, so compute the hash on the diff files and if they match hashes in old index,
-    // remove the entry
-    let old_diff = diff;
-    let mut diff = Vec::new();
-    for e in old_diff {
-        let file_hash = compute_file_hash(&e.path)?;
-        if hash_set.contains(&&*file_hash) {
-            diff.push(e);
+        .map(|x| ((x.entry.path.as_path(), x.entry.mtime, x.entry.size), x))
+        .collect::<HashMap<_, _>>();
+    let old_index_hash_set = old_index.iter().map(|x| &x.hash).collect::<HashSet<_>>();
+    let mut remaining = Vec::new();
+    for e in &files {
+        if let Some(v) = metadata_map.get(&(e.path.as_path(), e.mtime, e.size)) {
+            duplicates.push((e, Hash(v.hash)));
+        } else {
+            remaining.push(e);
         }
     }
-    info!("Diff count: {}", diff.len());
-
-    let diff_path_set = diff
-        .iter()
-        .map(|x| x.path.as_path())
-        .collect::<HashSet<_>>();
-    // these files are not touched; thus can be copied to the new index.db directly
-    let copied_entries = files
-        .iter()
-        .filter(|x| diff_path_set.contains(x.path.as_path()))
-        .collect::<Vec<_>>();
-
-    // back up diff files
-    // write_bak_files(&out_dir, todo!(), todo!())?;
-    info!("Adding up old index entries...");
-    let old_index_map = old_index
-        .iter()
-        .map(|x| (x.entry.path.as_path(), x))
-        .collect::<HashMap<_, _>>();
-    // let old_chunk_map = old_chunk
-    //     .iter()
-    //     .map(|x| (x.file_hash, x))
-    //     .collect::<HashMap<_, _>>();
-    // reopen the db, append data
-    let mut db = IndexDb::new(out_dir.join("index.db"))?;
-    let db_tx = db.transaction()?;
-    for e in copied_entries {
-        // assert: these lookups always succeed
-        let index_row = old_index_map[e.path.as_path()];
-        // let chunk_row = old_chunk_map[&index_row.hash];
-        // db_tx.insert_index_row(index_row)?;
-        // db_tx.insert_chunk_row(chunk_row)?;
+    info!("File count: {}", remaining.len());
+    info!("Deduplicating diff by hash...");
+    // if the diff file hash matches in the old file index, skip its backup
+    let mut files_to_backup = Vec::new();
+    for e in remaining {
+        let file_hash = compute_file_hash(e.full_path())?;
+        if !old_index_hash_set.contains(&&*file_hash) {
+            files_to_backup.push((file_hash, e));
+        } else {
+            duplicates.push((e, file_hash));
+        }
     }
-    db_tx.0.commit()?;
+    info!("File count: {}", files_to_backup.len());
+    assert_eq!(duplicates.len() + files_to_backup.len(), files.len());
+
+    info!("Writing backup files...");
+    let file_splits = write_bak_files(&out_dir, &src_dir, files_to_backup.iter().copied())?;
+
+    info!("Creating index database...");
+    let mut db = IndexDb::new(out_dir.join("index.db"), true)?;
+    let db_tx = db.transaction()?;
+    db_tx.insert_file_split_info(&file_splits)?;
+    let new_files_ref_map = files_to_backup
+        .iter()
+        .map(|x| (x.1 as *const _, x))
+        .collect::<HashMap<_, _>>();
+    // the current index = files_to_backup ...
+    for e in &files {
+        let entry = new_files_ref_map.get(&(e as *const _));
+        if let Some(e) = entry {
+            // this is the new file being backed up
+            let row = IndexRow {
+                hash: *e.0,
+                entry: e.1.clone(),
+            };
+            db_tx.insert_index_row(&row)?;
+        }
+    }
+    // ... + duplicates
+    for x in duplicates {
+        db_tx.insert_index_row(&IndexRow {
+            entry: x.0.clone(),
+            hash: *x.1,
+        })?;
+    }
+    // so if I do db_tx.0.commit()? outside, it doesn't work
+    {
+        let tx = db_tx;
+        tx.0.commit()?;
+    }
+    assert_eq!(db.query_index_row_count()?, files.len() as u64);
+    assert_eq!(
+        db.query_chunk_row_count()?,
+        file_splits.iter().map(|x| x.chunks.len()).sum::<usize>() as u64
+    );
 
     Ok(())
 }
@@ -109,7 +126,7 @@ fn initial_backup() -> anyhow::Result<()> {
     let mut unique_list = HashMap::new();
     for (i, e) in files.iter().enumerate() {
         info!("[{}/{}] {}", i, file_count, e.path.display());
-        let hash = compute_file_hash(&e.path)?;
+        let hash = compute_file_hash(&e.full_path())?;
         unique_list.insert(hash, e);
         file_hash_list.push(hash);
     }
@@ -119,10 +136,7 @@ fn initial_backup() -> anyhow::Result<()> {
 
     info!("Creating index database...");
     let db_path = out_dir.join("index.db");
-    if db_path.exists() {
-        fs::remove_file(&db_path)?;
-    }
-    let mut db = IndexDb::new(&db_path)?;
+    let mut db = IndexDb::new(&db_path, true)?;
     let db_tx = db.transaction()?;
     for x in files.iter().zip(file_hash_list) {
         db_tx.insert_index_row(&IndexRow {
@@ -130,18 +144,7 @@ fn initial_backup() -> anyhow::Result<()> {
             entry: x.0.clone(),
         })?;
     }
-    for x in file_splits {
-        let file_hash = x.file_hash;
-        for x in x.chunks {
-            db_tx.insert_chunk_row(&ChunkRow {
-                file_hash: *file_hash,
-                bak_n: x.bak_n,
-                chunk_hash: *x.hash,
-                offset: x.offset,
-                size: x.size,
-            })?;
-        }
-    }
+    db_tx.insert_file_split_info(&file_splits)?;
     db_tx.0.commit()?;
     info!("Done");
     Ok(())
@@ -170,13 +173,14 @@ fn write_bak_files<'a>(
     for (i, e) in files.into_iter().enumerate() {
         let file_size = e.1.size;
         let file_path = e.1.path.as_path();
+        let file_path_full = e.1.full_path();
         split_info_list.push(SplitInfo {
             file_hash: e.0,
             chunks: Default::default(),
         });
 
         let chunks = chunks_ranges(file_size);
-        let mut reader = BufReader::new(File::open(src_dir.join(file_path))?);
+        let mut reader = BufReader::new(File::open(file_path_full)?);
         for (chunk_n, r) in chunks.iter().enumerate() {
             info!(
                 "Write file [{i}/{file_count}] {} chunk #{}",
@@ -193,6 +197,7 @@ fn write_bak_files<'a>(
                 bak_output.flush()?;
                 // directly assign to it; Rust will drop the old one
                 bak_output = create_bak_file(bak_n)?;
+                bak_total_size = 0;
             }
 
             let chunk_reader = reader.by_ref().take(r.size);

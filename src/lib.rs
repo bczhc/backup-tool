@@ -83,14 +83,19 @@ pub fn configure_log() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FileEntry {
+    /// Always be relative
     pub path: PathBuf,
     pub size: u64,
     pub mtime: FileNanoTime,
 }
 
-impl FileEntry {}
+impl FileEntry {
+    pub fn full_path(&self) -> PathBuf {
+        mutex_lock!(ARGS).source_dir.join(&self.path)
+    }
+}
 
 pub struct ChunkInfo {
     pub hash: Hash,
@@ -104,7 +109,7 @@ pub struct SplitInfo {
     pub chunks: Vec<ChunkInfo>,
 }
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct FileNanoTime(pub u64);
 
 impl From<FileTime> for FileNanoTime {
@@ -135,9 +140,10 @@ pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
         }
         let metadata = e.metadata()?;
         let mtime = FileTime::from_last_modification_time(&metadata);
-        // let relative_path = pathdiff::diff_paths(e.path(), base_dir).expect("Unexpected: cannot get a relative path");
+        let relative_path = pathdiff::diff_paths(e.path(), base_dir)
+            .expect("Unexpected: cannot get a relative path");
         let entry = FileEntry {
-            path: e.path(),
+            path: relative_path,
             size: metadata.len(),
             mtime: mtime.into(),
         };
@@ -255,7 +261,7 @@ pub struct Range {
 const HASH_SIZE: usize = 16;
 
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq)]
-pub struct Hash([u8; HASH_SIZE]);
+pub struct Hash(pub [u8; HASH_SIZE]);
 
 impl Deref for Hash {
     type Target = [u8; HASH_SIZE];
