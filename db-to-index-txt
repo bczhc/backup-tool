@@ -1,0 +1,15 @@
+#!/bin/bash
+
+[ $# -eq 0 ] && echo "Usage: $0 <index.db>" && exit 1
+
+sqlite3 "$1" << EOF
+.mode csv
+.output diff.txt
+select i.path, i.size from \`index\` as i inner join main.chunk c on i.hash = c.file_hash;
+EOF
+
+sqlite3 "$1" << EOF
+.mode csv
+.output index.txt
+select path, size from \`index\`;
+EOF
