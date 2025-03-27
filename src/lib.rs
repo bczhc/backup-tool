@@ -358,7 +358,8 @@ impl<W: Write + Send + 'static> ProgramFilterWrapper<W> {
 
         let copy_thread = spawn(move || {
             let mut writer = writer;
-            io::copy(&mut BufReader::new(stdout), &mut writer).expect("Error: io copy stdout -> writer");
+            io::copy(&mut BufReader::new(stdout), &mut writer)
+                .expect("Error: io copy stdout -> writer");
         });
 
         let this = Self {
@@ -374,7 +375,7 @@ impl<W: Write + Send + 'static> ProgramFilterWrapper<W> {
             x.join().expect("Failed to join thread");
         }
     }
-    
+
     pub fn close_program_in(&mut self) {
         if let Some(x) = self.program_in.take() {
             drop(x);
@@ -382,7 +383,7 @@ impl<W: Write + Send + 'static> ProgramFilterWrapper<W> {
     }
 }
 
-impl<W:Write+Send+'static> Drop for ProgramFilterWrapper<W> {
+impl<W: Write + Send + 'static> Drop for ProgramFilterWrapper<W> {
     fn drop(&mut self) {
         self.close_program_in();
         self.wait_for_output_stream();

@@ -1,22 +1,19 @@
 #![feature(yeet_expr)]
 
 use anyhow::anyhow;
-use backup_tool::db::{ChunkRow, IndexDb, IndexDbTx, IndexRow};
+use backup_tool::db::{IndexDb, IndexRow};
 use backup_tool::{
     chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, BakOutputWriter,
-    ChunkInfo, CliArgs, FileEntry, Hash, HashReadWrapper, ProgramFilterWrapper, SplitInfo, ARGS,
-    BACKUP_SIZE, CHUNK_SIZE,
+    ChunkInfo, CliArgs, FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS,
+    BACKUP_SIZE,
 };
 use clap::Parser;
-use log::{debug, info};
-use rusqlite::Transaction;
-use std::cell::RefCell;
+use log::info;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::{fs, io, mem};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::path::Path;
+use std::{fs, io};
 use yeet_ops::yeet;
 
 fn main() -> anyhow::Result<()> {
@@ -142,7 +139,7 @@ fn initial_backup() -> anyhow::Result<()> {
     let mut unique_list = HashMap::new();
     for (i, e) in files.iter().enumerate() {
         info!("[{}/{}] {}", i, file_count, e.path.display());
-        let hash = compute_file_hash(&e.full_path())?;
+        let hash = compute_file_hash(e.full_path())?;
         unique_list.insert(hash, e);
         file_hash_list.push(hash);
     }
