@@ -1,3 +1,5 @@
+#![feature(yeet_expr)]
+
 use backup_tool::db::{ChunkRow, IndexDb, IndexDbTx, IndexRow};
 use backup_tool::{
     chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, ChunkInfo, CliArgs,
@@ -12,11 +14,21 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::{fs, io, mem};
+use anyhow::anyhow;
+use yeet_ops::yeet;
 
 fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
     *mutex_lock!(ARGS) = args.clone();
     configure_log()?;
+
+    if !args.out_dir.exists() {
+        fs::create_dir_all(&args.out_dir)?;
+    }
+    let child_count = fs::read_dir(&args.out_dir)?.count();
+    if child_count != 0 {
+        yeet!(anyhow!("Non-empty output directory; please choose another one."));
+    }
 
     if args.ref_index.is_none() {
         initial_backup()?;
@@ -115,6 +127,7 @@ fn differential_backup() -> anyhow::Result<()> {
 
 fn initial_backup() -> anyhow::Result<()> {
     // Do the first full backup
+    info!("Indexing files...");
     let src_dir = mutex_lock!(ARGS).source_dir.clone();
     let files = index_files(&src_dir)?;
     let out_dir = mutex_lock!(ARGS).out_dir.clone();
