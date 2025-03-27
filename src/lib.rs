@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -341,7 +341,7 @@ impl Deref for PathBytes {
 
 pub struct ProgramFilterWrapper<W: Write + Send + 'static> {
     _p: PhantomData<W>,
-    program_in: Option<ChildStdin>,
+    program_in: Option<BufWriter<ChildStdin>>,
     copy_thread_handler: Option<JoinHandle<()>>,
 }
 
@@ -353,17 +353,17 @@ impl<W: Write + Send + 'static> ProgramFilterWrapper<W> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
-        let mut stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
         let stdin = child.stdin.take().unwrap();
 
         let copy_thread = spawn(move || {
             let mut writer = writer;
-            io::copy(&mut stdout, &mut writer).expect("Error: io copy stdout -> writer");
+            io::copy(&mut BufReader::new(stdout), &mut writer).expect("Error: io copy stdout -> writer");
         });
 
         let this = Self {
             _p: Default::default(),
-            program_in: Some(stdin),
+            program_in: Some(BufWriter::new(stdin)),
             copy_thread_handler: Some(copy_thread),
         };
         Ok(this)
@@ -391,11 +391,11 @@ impl<W:Write+Send+'static> Drop for ProgramFilterWrapper<W> {
 
 impl<W: Write + Send> Write for ProgramFilterWrapper<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.program_in.as_ref().unwrap().write(buf)
+        self.program_in.as_mut().unwrap().write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.program_in.as_ref().unwrap().flush()
+        self.program_in.as_mut().unwrap().flush()
     }
 }
 
