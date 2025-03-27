@@ -34,9 +34,13 @@ pub static CHUNK_SIZE: Lazy<u64> = Lazy::new(|| {
 });
 
 pub static BACKUP_SIZE: Lazy<u64> = Lazy::new(|| {
-    ByteSize::from_str(&mutex_lock!(ARGS).backup_size)
+    let backup_size = ByteSize::from_str(&mutex_lock!(ARGS).backup_size)
         .expect("Failed to parse size string")
-        .0
+        .0;
+    if backup_size < *CHUNK_SIZE {
+        panic!("backup size > chunk size must require")
+    }
+    backup_size
 });
 
 #[derive(Parser, Default, Debug, Clone)]

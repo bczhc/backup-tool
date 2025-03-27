@@ -1,8 +1,5 @@
 use backup_tool::db::{ChunkRow, IndexDb, IndexRow};
-use backup_tool::{
-    chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, CliArgs, FileEntry,
-    Hash, HashReadWrapper, ARGS, CHUNK_SIZE,
-};
+use backup_tool::{chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, CliArgs, FileEntry, Hash, HashReadWrapper, ARGS, BACKUP_SIZE, CHUNK_SIZE};
 use clap::Parser;
 use log::info;
 use std::cell::RefCell;
@@ -142,6 +139,18 @@ fn backup_files<'a>(
                 e.path.display(),
                 chunk_n + 1
             );
+
+            // Check if a new 'bak' file is needed, that's, this 'bak' file is not sufficient for
+            // storing a new chunk.
+            // write to the new 'bak' file; close the old and create a new one
+            if bak_total_size + r.size > *BACKUP_SIZE {
+                bak_n += 1;
+                chunk_offset = 0;
+                bak_output.flush()?;
+                // directly assign to it; Rust will drop the old one
+                bak_output = create_bak_file(bak_n)?;
+            }
+            
             let chunk_reader = reader.by_ref().take(r.size);
             let mut hash_wrapper = HashReadWrapper::new(chunk_reader);
             io::copy(&mut hash_wrapper, &mut bak_output)?;
@@ -152,14 +161,6 @@ fn backup_files<'a>(
 
             bak_total_size += r.size;
             chunk_offset += r.size;
-            // write to the new 'bak' file; close the old and create a new one
-            if bak_total_size >= *CHUNK_SIZE {
-                bak_n += 1;
-                chunk_offset = 0;
-                bak_output.flush()?;
-                // directly assign to it; Rust will drop the old one
-                bak_output = create_bak_file(bak_n)?;
-            }
         }
         debug_assert_eq!(reader.stream_position()?, e.size);
         let full_file_hash = reader.finalize();
