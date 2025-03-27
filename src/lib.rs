@@ -1,20 +1,24 @@
 #![feature(decl_macro)]
 
-use std::fmt::{Display, Formatter};
-use blake3::{Hasher};
+use blake3::Hasher;
 use bytesize::ByteSize;
 use clap::Parser;
 use colored::Colorize;
 use fern::colors::{Color, ColoredLevelConfig};
 use filetime::FileTime;
 use once_cell::sync::Lazy;
+use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::SystemTime;
+use cfg_if::cfg_if;
+
+pub mod db;
 
 pub macro mutex_lock($e:expr) {
     $e.lock().unwrap()
@@ -77,11 +81,29 @@ pub fn configure_log() -> anyhow::Result<()> {
 pub struct FileEntry {
     pub path: PathBuf,
     pub size: u64,
-    pub mtime: FileTime,
-    pub hash: Option<Hash>,
+    pub mtime: FileNanoTime,
 }
 
-impl FileEntry {}
+impl FileEntry {
+}
+
+pub struct FileNanoTime(pub FileTime, pub u64);
+
+impl From<FileTime> for FileNanoTime {
+    fn from(value: FileTime) -> Self {
+        let sec: u64 = value.unix_seconds().try_into().expect("Negative seconds");
+        let nano_portion: u64 = value.nanoseconds() as u64;
+        Self(value, sec * 1_000_000_000 + nano_portion)
+    }
+}
+
+impl Deref for FileNanoTime {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
 
 pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
     let mut collected = Vec::new();
@@ -97,8 +119,7 @@ pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
         let entry = FileEntry {
             path: e.path(),
             size: metadata.len(),
-            mtime,
-            hash: None,
+            mtime: mtime.into(),
         };
         collected.push(entry);
     }
@@ -179,6 +200,12 @@ impl<R: Read> Read for HashReadWrapper<R> {
     }
 }
 
+impl<R: Read +Seek> Seek for HashReadWrapper<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 pub fn chunks_ranges(file_size: u64) -> Vec<Range> {
     let mut ranges = Vec::new();
     let chunk_size = *CHUNK_SIZE;
@@ -210,6 +237,14 @@ const HASH_SIZE: usize = 16;
 #[derive(Default, Copy, Clone)]
 pub struct Hash([u8; HASH_SIZE]);
 
+impl Deref for Hash {
+    type Target = [u8; HASH_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl From<blake3::Hash> for Hash {
     fn from(value: blake3::Hash) -> Self {
         let mut half = Hash::default();
@@ -221,5 +256,27 @@ impl From<blake3::Hash> for Hash {
 impl Display for Hash {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(&hex::encode(self.0))
+    }
+}
+
+/// Represents raw bytes of a `Path`.
+///
+/// On Linux, a path is naturally a `Vec<u8>`. On Windows, do a conversion.
+pub struct PathBytes(Vec<u8>);
+
+impl<P: Into<PathBuf>> From<P> for PathBytes {
+    fn from(value: P) -> Self {
+        let pb = value.into();
+        #[allow(clippy::needless_late_init)]
+        let bytes: Vec<u8>;
+        cfg_if! {
+            if #[cfg(unix)] {
+                use std::os::unix::ffi::OsStringExt;
+                bytes = pb.into_os_string().into_vec();
+            } else {
+                bytes = pb.to_str().expect("Invalid path: `to_str()` conversion failed").into();
+            }
+        }
+        Self(bytes)
     }
 }

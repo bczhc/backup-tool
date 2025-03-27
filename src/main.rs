@@ -1,10 +1,14 @@
-use backup_tool::{chunks_ranges, configure_log, index_files, mutex_lock, CliArgs, Hash, HashReadWrapper, ARGS, CHUNK_SIZE};
+use backup_tool::db::{ChunkRow, IndexDb, IndexRow};
+use backup_tool::{
+    chunks_ranges, configure_log, index_files, mutex_lock, CliArgs, Hash, HashReadWrapper, ARGS,
+    CHUNK_SIZE,
+};
 use clap::Parser;
 use log::info;
-use std::fs::File;
-use std::{io, mem};
 use std::cell::RefCell;
+use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::{fs, io, mem};
 
 fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
@@ -18,14 +22,22 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initial_backup() -> anyhow::Result<()> {
+    // Do the first full backup
     let mut files = index_files(&mutex_lock!(ARGS).source_dir)?;
     let out_dir = mutex_lock!(ARGS).out_dir.clone();
     let file_count = files.len();
-    println!("{}", files.len());
+    info!("File count: {file_count}");
+
+    info!("Creating the index database...");
+    let index_db_path = out_dir.join("index.db");
+    if index_db_path.exists() {
+        fs::remove_file(index_db_path.as_path())?;
+    }
+    let mut db = IndexDb::new(index_db_path)?;
+    let db_tx = db.transaction()?;
 
     let mut file_chunks_hash = vec![Vec::<Hash>::new(); file_count];
 
-    // Do the first full backup
     let mut bak_n = 0;
     let mut bak_total_size = 0_u64;
     // chunk offset of the current 'bak' file in index.txt
@@ -36,17 +48,16 @@ fn initial_backup() -> anyhow::Result<()> {
         Ok(BufWriter::new(File::create(&bak_file)?))
     };
     let mut bak_output = create_bak_file(bak_n)?;
-    
+
     for (i, e) in files.iter_mut().enumerate() {
         let chunks = chunks_ranges(e.size);
-        let mut reader = BufReader::new(File::open(&e.path)?);
+        let mut reader = HashReadWrapper::new(BufReader::new(File::open(&e.path)?));
         for (chunk_n, r) in chunks.iter().enumerate() {
             info!(
                 "Write file [{i}/{file_count}] {} chunk #{}",
                 e.path.display(),
                 chunk_n + 1
             );
-            reader.seek(SeekFrom::Start(r.start))?;
             let chunk_reader = reader.by_ref().take(r.size);
             let mut hash_wrapper = HashReadWrapper::new(chunk_reader);
             io::copy(&mut hash_wrapper, &mut bak_output)?;
@@ -54,7 +65,7 @@ fn initial_backup() -> anyhow::Result<()> {
             file_chunks_hash[i].push(chunk_hash);
 
             chunks_index.push((chunk_hash, format!("bak{bak_n}"), chunk_offset, r.size));
-            
+
             bak_total_size += r.size;
             chunk_offset += r.size;
             // write to the new 'bak' file; close the old and create a new one
@@ -66,9 +77,29 @@ fn initial_backup() -> anyhow::Result<()> {
                 bak_output = create_bak_file(bak_n)?;
             }
         }
+        debug_assert_eq!(reader.stream_position()?, e.size);
+        let full_file_hash = reader.finalize();
+        db_tx.insert_index_row(&IndexRow {
+            path: (&e.path).into(),
+            size: e.size,
+            mtime: *e.mtime,
+            hash: *full_file_hash,
+        })?;
+        let split_list = file_chunks_hash[i]
+            .iter()
+            .map(|x| format!("{x}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        db_tx.insert_chunk_row(&ChunkRow {
+            file_hash: *full_file_hash,
+            splits: split_list,
+        })?;
     }
     // flush the last 'bak' file
     bak_output.flush()?;
+
+    info!("Committing index database...");
+    db_tx.0.commit()?;
 
     info!("Writing index file for chunks...");
     // format: chunk-hash, bak filename, offset, size
