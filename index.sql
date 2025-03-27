@@ -1,6 +1,6 @@
 create table if not exists `index`
 (
-    path  blob,
+    path  blob unique,
     size  integer,
     mtime integer,
     hash  blob

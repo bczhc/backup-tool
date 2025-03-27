@@ -1,12 +1,10 @@
-use crate::{PathBytes, HASH_SIZE};
+use crate::{FileEntry, FileNanoTime, PathBytes, HASH_SIZE};
+use rusqlite::fallible_iterator::{FallibleIterator, IteratorExt};
 use rusqlite::{params, Connection, Transaction};
 use std::path::Path;
 
 pub struct IndexRow {
-    /// Use raw u8 array to support unix paths.
-    pub path: PathBytes,
-    pub size: u64,
-    pub mtime: u64,
+    pub entry: FileEntry,
     pub hash: [u8; HASH_SIZE],
 }
 
@@ -31,6 +29,36 @@ impl IndexDb {
     pub fn transaction(&mut self) -> anyhow::Result<IndexDbTx> {
         Ok(IndexDbTx(self.db.transaction()?))
     }
+
+    pub fn select_index_all(&self) -> anyhow::Result<Vec<IndexRow>> {
+        let mut stmt = self
+            .db
+            .prepare_cached("select path, size, mtime, hash from `index`")?;
+        let map = stmt.query_map(params![], |r| {
+            Ok(IndexRow {
+                entry: FileEntry {
+                    path: PathBytes(r.get_unwrap(0)).into_path_buf(),
+                    size: r.get_unwrap(1),
+                    mtime: FileNanoTime(r.get_unwrap(2)),
+                },
+                hash: r.get_unwrap(3),
+            })
+        })?;
+        Ok(map.into_iter().transpose_into_fallible().collect()?)
+    }
+
+    pub fn select_chunk_all(&self) -> anyhow::Result<Vec<ChunkRow>> {
+        let mut stmt = self
+            .db
+            .prepare_cached("select file_hash, splits from chunk")?;
+        let map = stmt.query_map(params![], |r| {
+            Ok(ChunkRow {
+                file_hash: r.get_unwrap(0),
+                splits: r.get_unwrap(1),
+            })
+        })?;
+        Ok(map.into_iter().transpose_into_fallible().collect()?)
+    }
 }
 
 pub struct IndexDbTx<'a>(pub Transaction<'a>);
@@ -41,9 +69,9 @@ impl<'a> IndexDbTx<'a> {
             .0
             .prepare_cached("insert into `index` (path, size, mtime, hash) values (?, ?, ?, ?)")?;
         stmt.insert(params![
-            row.path.0.as_slice(),
-            row.size,
-            row.mtime,
+            &*PathBytes::from(&row.entry.path),
+            row.entry.size,
+            *row.entry.mtime,
             row.hash
         ])?;
         Ok(())

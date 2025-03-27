@@ -1,5 +1,6 @@
 #![feature(decl_macro)]
 
+use std::ffi::OsString;
 use blake3::Hasher;
 use bytesize::ByteSize;
 use clap::Parser;
@@ -87,13 +88,14 @@ pub struct FileEntry {
 impl FileEntry {
 }
 
-pub struct FileNanoTime(pub FileTime, pub u64);
+#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+pub struct FileNanoTime(pub u64);
 
 impl From<FileTime> for FileNanoTime {
     fn from(value: FileTime) -> Self {
         let sec: u64 = value.unix_seconds().try_into().expect("Negative seconds");
         let nano_portion: u64 = value.nanoseconds() as u64;
-        Self(value, sec * 1_000_000_000 + nano_portion)
+        Self(sec * 1_000_000_000 + nano_portion)
     }
 }
 
@@ -101,7 +103,7 @@ impl Deref for FileNanoTime {
     type Target = u64;
 
     fn deref(&self) -> &Self::Target {
-        &self.1
+        &self.0
     }
 }
 
@@ -262,7 +264,7 @@ impl Display for Hash {
 /// Represents raw bytes of a `Path`.
 ///
 /// On Linux, a path is naturally a `Vec<u8>`. On Windows, do a conversion.
-pub struct PathBytes(Vec<u8>);
+pub struct PathBytes(pub Vec<u8>);
 
 impl<P: Into<PathBuf>> From<P> for PathBytes {
     fn from(value: P) -> Self {
@@ -278,5 +280,29 @@ impl<P: Into<PathBuf>> From<P> for PathBytes {
             }
         }
         Self(bytes)
+    }
+}
+
+impl PathBytes {
+    fn into_path_buf(self) -> PathBuf {
+        #[allow(clippy::needless_late_init)]
+        let buf: PathBuf;
+        cfg_if! {
+            if #[cfg(unix)] {
+                use std::os::unix::ffi::OsStringExt;
+                buf = OsString::from_vec(self.0).into();
+            } else {
+                buf = String::from_utf8(self.0).expect("Invalid UTF-8 in path").into();
+            }
+        }
+        buf
+    }
+}
+
+impl Deref for PathBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
