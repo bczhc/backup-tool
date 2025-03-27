@@ -12,11 +12,14 @@ use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::process::{ChildStdin, Command, Stdio};
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::thread::{spawn, JoinHandle};
 use std::time::SystemTime;
 
 pub mod db;
@@ -61,6 +64,11 @@ pub struct CliArgs {
     /// Size of each backup output file. Default to 3GiB
     #[arg(short = 's', long, default_value = "3GiB")]
     pub backup_size: String,
+    /// External program filter for backup files.
+    ///
+    /// E.g. for compression & encryption, `bash -c 'pbzip2 | openssl enc -aes-256-cbc -pbkdf2'` can be used.
+    #[arg(short = 'f', long, allow_hyphen_values = true, num_args = 1..)]
+    pub backup_output_filter: Option<Vec<OsString>>,
 }
 
 pub fn configure_log() -> anyhow::Result<()> {
@@ -328,5 +336,102 @@ impl Deref for PathBytes {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+pub struct ProgramFilterWrapper<W: Write + Send + 'static> {
+    _p: PhantomData<W>,
+    program_in: Option<ChildStdin>,
+    copy_thread_handler: Option<JoinHandle<()>>,
+}
+
+impl<W: Write + Send + 'static> ProgramFilterWrapper<W> {
+    pub fn new(writer: W, cmd: &[OsString]) -> io::Result<Self> {
+        let mut child = Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .stderr(Stdio::inherit())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let mut stdout = child.stdout.take().unwrap();
+        let stdin = child.stdin.take().unwrap();
+
+        let copy_thread = spawn(move || {
+            let mut writer = writer;
+            io::copy(&mut stdout, &mut writer).expect("Error: io copy stdout -> writer");
+        });
+
+        let this = Self {
+            _p: Default::default(),
+            program_in: Some(stdin),
+            copy_thread_handler: Some(copy_thread),
+        };
+        Ok(this)
+    }
+
+    pub fn wait_for_output_stream(&mut self) {
+        if let Some(x) = self.copy_thread_handler.take() {
+            x.join().expect("Failed to join thread");
+        }
+    }
+    
+    pub fn close_program_in(&mut self) {
+        if let Some(x) = self.program_in.take() {
+            drop(x);
+        }
+    }
+}
+
+impl<W:Write+Send+'static> Drop for ProgramFilterWrapper<W> {
+    fn drop(&mut self) {
+        self.close_program_in();
+        self.wait_for_output_stream();
+    }
+}
+
+impl<W: Write + Send> Write for ProgramFilterWrapper<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.program_in.as_ref().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.program_in.as_ref().unwrap().flush()
+    }
+}
+
+pub enum BakOutputType<W: Write + Send + 'static> {
+    Plain(W),
+    Filtered(ProgramFilterWrapper<W>),
+}
+
+pub struct BakOutputWriter<W: Write + Send + 'static> {
+    output: BakOutputType<W>,
+}
+
+impl<W: Write + Send + 'static> BakOutputWriter<W> {
+    pub fn new(inner: W, filter: Option<&Vec<OsString>>) -> io::Result<Self> {
+        let output = if let Some(f) = filter {
+            BakOutputType::Filtered(ProgramFilterWrapper::new(inner, f)?)
+        } else {
+            BakOutputType::Plain(inner)
+        };
+
+        Ok(Self { output })
+    }
+}
+
+impl<W: Write + Send + 'static> Write for BakOutputWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &mut self.output {
+            BakOutputType::Plain(x) => x.write(buf),
+            BakOutputType::Filtered(x) => x.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.output {
+            BakOutputType::Plain(x) => x.flush(),
+            BakOutputType::Filtered(x) => x.flush(),
+        }
     }
 }

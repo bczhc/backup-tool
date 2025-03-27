@@ -1,9 +1,11 @@
 #![feature(yeet_expr)]
 
+use anyhow::anyhow;
 use backup_tool::db::{ChunkRow, IndexDb, IndexDbTx, IndexRow};
 use backup_tool::{
-    chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, ChunkInfo, CliArgs,
-    FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE, CHUNK_SIZE,
+    chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, BakOutputWriter,
+    ChunkInfo, CliArgs, FileEntry, Hash, HashReadWrapper, ProgramFilterWrapper, SplitInfo, ARGS,
+    BACKUP_SIZE, CHUNK_SIZE,
 };
 use clap::Parser;
 use log::{debug, info};
@@ -13,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::{fs, io, mem};
-use anyhow::anyhow;
 use yeet_ops::yeet;
 
 fn main() -> anyhow::Result<()> {
@@ -27,7 +29,9 @@ fn main() -> anyhow::Result<()> {
     }
     let child_count = fs::read_dir(&args.out_dir)?.count();
     if child_count != 0 {
-        yeet!(anyhow!("Non-empty output directory; please choose another one."));
+        yeet!(anyhow!(
+            "Non-empty output directory; please choose another one."
+        ));
     }
 
     if args.ref_index.is_none() {
@@ -44,7 +48,6 @@ fn differential_backup() -> anyhow::Result<()> {
     let files = index_files(&mutex_lock!(ARGS).source_dir)?;
     info!("File count: {}", files.len());
     let out_dir = mutex_lock!(ARGS).out_dir.clone();
-    let src_dir = mutex_lock!(ARGS).source_dir.clone();
     let ref_db_path = mutex_lock!(ARGS).ref_index.as_ref().unwrap().clone();
     let ref_db = IndexDb::new(ref_db_path, false)?;
 
@@ -82,7 +85,7 @@ fn differential_backup() -> anyhow::Result<()> {
     assert_eq!(duplicates.len() + files_to_backup.len(), files.len());
 
     info!("Writing backup files...");
-    let file_splits = write_bak_files(&out_dir, &src_dir, files_to_backup.iter().copied())?;
+    let file_splits = write_bak_files(&out_dir, files_to_backup.iter().copied())?;
 
     info!("Creating index database...");
     let mut db = IndexDb::new(out_dir.join("index.db"), true)?;
@@ -144,8 +147,7 @@ fn initial_backup() -> anyhow::Result<()> {
         file_hash_list.push(hash);
     }
     info!("Writing to backup files...");
-    let file_splits =
-        write_bak_files(&out_dir, &src_dir, unique_list.iter().map(|x| (*x.0, *x.1)))?;
+    let file_splits = write_bak_files(&out_dir, unique_list.iter().map(|x| (*x.0, *x.1)))?;
 
     info!("Creating index database...");
     let db_path = out_dir.join("index.db");
@@ -165,7 +167,6 @@ fn initial_backup() -> anyhow::Result<()> {
 
 fn write_bak_files<'a>(
     out_dir: &Path,
-    src_dir: &Path,
     files: impl ExactSizeIterator<Item = (Hash, &'a FileEntry)>,
 ) -> anyhow::Result<Vec<SplitInfo>> {
     let file_count = files.len();
@@ -175,9 +176,12 @@ fn write_bak_files<'a>(
     let mut bak_total_size = 0_u64;
     // chunk offset of the current 'bak' file in index.txt
     let mut chunk_offset = 0_u64;
-    let create_bak_file = |bak_n: i32| -> anyhow::Result<BufWriter<File>> {
+    let output_filter = mutex_lock!(ARGS).backup_output_filter.clone();
+    let create_bak_file = |bak_n: i32| -> anyhow::Result<_> {
         let bak_file = out_dir.join(format!("bak{bak_n}"));
-        Ok(BufWriter::new(File::create(&bak_file)?))
+        let writer = BufWriter::new(File::create(&bak_file)?);
+        let writer = BakOutputWriter::new(writer, output_filter.as_ref())?;
+        Ok(writer)
     };
     let mut bak_output = create_bak_file(bak_n)?;
 
