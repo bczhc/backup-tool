@@ -2,11 +2,7 @@
 
 use anyhow::anyhow;
 use backup_tool::db::{IndexDb, IndexRow};
-use backup_tool::{
-    chunks_ranges, compute_file_hash, configure_log, index_files, mutex_lock, BakOutputWriter,
-    ChunkInfo, CliArgs, FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS,
-    BACKUP_SIZE,
-};
+use backup_tool::{chunks_ranges, compute_file_hash, configure_log, create_user_dir, index_files, index_formatted_name, mutex_lock, BakOutputWriter, ChunkInfo, CliArgs, FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE};
 use clap::Parser;
 use log::info;
 use std::collections::{HashMap, HashSet};
@@ -36,6 +32,9 @@ fn main() -> anyhow::Result<()> {
     } else {
         differential_backup()?;
     }
+
+    let user_dir = create_user_dir(&args.source_dir)?;
+    fs::copy(args.out_dir.join("index.db"), user_dir.join(index_formatted_name()))?;
     Ok(())
 }
 

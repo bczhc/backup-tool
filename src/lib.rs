@@ -7,11 +7,11 @@ use clap::Parser;
 use colored::Colorize;
 use fern::colors::{Color, ColoredLevelConfig};
 use filetime::FileTime;
+use log::error;
 use once_cell::sync::Lazy;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io;
+use std::fs::{File, Permissions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -20,7 +20,9 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread::{spawn, JoinHandle};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io};
+use chrono::Local;
 
 pub mod db;
 
@@ -29,6 +31,20 @@ pub macro mutex_lock($e:expr) {
 }
 
 pub static ARGS: Lazy<Mutex<CliArgs>> = Lazy::new(|| Mutex::new(Default::default()));
+
+const USER_DIR_NAME: &str = ".baktool";
+
+pub fn create_user_dir(src_base: impl AsRef<Path>) -> io::Result<PathBuf> {
+    let path = src_base.as_ref().join(USER_DIR_NAME);
+    if !path.exists() {
+        fs::create_dir(&path)?;
+    }
+    Ok(path)
+}
+
+pub fn index_formatted_name() -> String {
+    Local::now().format("index_%Y%m%d_%H%M%S").to_string()
+}
 
 pub static CHUNK_SIZE: Lazy<u64> = Lazy::new(|| {
     ByteSize::from_str(&mutex_lock!(ARGS).chunk_size)
@@ -141,9 +157,19 @@ pub fn index_files(dir: impl AsRef<Path>) -> io::Result<Vec<FileEntry>> {
     let mut collected = Vec::new();
     let walk = jwalk::WalkDir::new(base_dir).skip_hidden(false);
     for x in walk {
-        let e = x?;
+        let e = match x {
+            Ok(e) => e,
+            Err(e) => {
+                error!("Error indexing file: {:?}", e);
+                continue;
+            }
+        };
         // only accept regular files
         if !e.file_type.is_file() {
+            continue;
+        }
+        if File::open(e.path()).is_err() {
+            error!("Failed to open file: {}", e.path().display());
             continue;
         }
         let metadata = e.metadata()?;
