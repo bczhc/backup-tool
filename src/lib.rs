@@ -3,12 +3,15 @@
 use blake3::Hasher;
 use bytesize::ByteSize;
 use cfg_if::cfg_if;
+use chrono::Local;
 use clap::Parser;
 use colored::Colorize;
 use fern::colors::{Color, ColoredLevelConfig};
 use filetime::FileTime;
+use lazy_regex::{regex, Regex};
 use log::error;
 use once_cell::sync::Lazy;
+use rusqlite::fallible_iterator::{FallibleIterator, IteratorExt};
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, Permissions};
@@ -22,7 +25,6 @@ use std::sync::Mutex;
 use std::thread::{spawn, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
-use chrono::Local;
 
 pub mod db;
 
@@ -34,6 +36,8 @@ pub static ARGS: Lazy<Mutex<CliArgs>> = Lazy::new(|| Mutex::new(Default::default
 
 const USER_DIR_NAME: &str = ".baktool";
 
+static INDEX_DB_FORMAT: &Lazy<Regex> = regex!("^index_[0-9]{8}_[0-9]{6}$");
+
 pub fn create_user_dir(src_base: impl AsRef<Path>) -> io::Result<PathBuf> {
     let path = src_base.as_ref().join(USER_DIR_NAME);
     if !path.exists() {
@@ -44,6 +48,17 @@ pub fn create_user_dir(src_base: impl AsRef<Path>) -> io::Result<PathBuf> {
 
 pub fn index_formatted_name() -> String {
     Local::now().format("index_%Y%m%d_%H%M%S").to_string()
+}
+
+pub fn index_pick_last(base_dir: impl AsRef<Path>) -> anyhow::Result<Option<PathBuf>> {
+    let mut names = fs::read_dir(base_dir.as_ref())?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|x| x.file_name().to_string_lossy().to_string())
+        .filter(|x| INDEX_DB_FORMAT.is_match(x))
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names.last().map(|x| base_dir.as_ref().join(x)))
 }
 
 pub static CHUNK_SIZE: Lazy<u64> = Lazy::new(|| {
@@ -69,11 +84,6 @@ pub struct CliArgs {
     /// Output directory location
     #[arg(short, long)]
     pub out_dir: PathBuf,
-    /// Path to the reference index database file
-    ///
-    /// On an initial backup, this is not passed.
-    #[arg(short, long)]
-    pub ref_index: Option<PathBuf>,
     /// Chunk size for each file. Default to 128MiB
     #[arg(short, long, default_value = "128MiB")]
     pub chunk_size: String,

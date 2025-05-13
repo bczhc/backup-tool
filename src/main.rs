@@ -4,8 +4,8 @@ use anyhow::anyhow;
 use backup_tool::db::{IndexDb, IndexRow};
 use backup_tool::{
     chunks_ranges, compute_file_hash, configure_log, create_user_dir, index_files,
-    index_formatted_name, mutex_lock, BakOutputWriter, ChunkInfo, CliArgs, FileEntry, Hash,
-    HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE,
+    index_formatted_name, index_pick_last, mutex_lock, BakOutputWriter, ChunkInfo, CliArgs,
+    FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE,
 };
 use clap::Parser;
 use log::info;
@@ -32,22 +32,30 @@ fn main() -> anyhow::Result<()> {
     }
 
     let user_dir = create_user_dir(&args.source_dir)?;
+    let last_index = index_pick_last(create_user_dir(args.source_dir)?)?;
     let ctx = Context {
-        index_db:user_dir.join(index_formatted_name()),
+        index_db: user_dir.join(index_formatted_name()),
+        last_index,
     };
 
-    if args.ref_index.is_none() {
-        initial_backup(&ctx)?;
-    } else {
-        differential_backup(&ctx)?;
+    match &ctx.last_index {
+        None => {
+            info!("Processing initial backup...");
+            initial_backup(&ctx)?
+        }
+        Some(_) => {
+            info!("Processing differential backup...");
+            differential_backup(&ctx)?
+        }
     }
-    
+
     fs::copy(&ctx.index_db, args.out_dir.join("index.db"))?;
     Ok(())
 }
 
 struct Context {
     index_db: PathBuf,
+    last_index: Option<PathBuf>,
 }
 
 fn differential_backup(ctx: &Context) -> anyhow::Result<()> {
@@ -56,7 +64,8 @@ fn differential_backup(ctx: &Context) -> anyhow::Result<()> {
     let files = index_files(&mutex_lock!(ARGS).source_dir)?;
     info!("File count: {}", files.len());
     let out_dir = mutex_lock!(ARGS).out_dir.clone();
-    let ref_db_path = mutex_lock!(ARGS).ref_index.as_ref().unwrap().clone();
+    let ref_db_path = ctx.last_index.clone().unwrap();
+    info!("Picked ref_db: {}", ref_db_path.display());
     let ref_db = IndexDb::new(ref_db_path, false)?;
 
     // find out differential files by path, mtime and size
