@@ -2,13 +2,17 @@
 
 use anyhow::anyhow;
 use backup_tool::db::{IndexDb, IndexRow};
-use backup_tool::{chunks_ranges, compute_file_hash, configure_log, create_user_dir, index_files, index_formatted_name, mutex_lock, BakOutputWriter, ChunkInfo, CliArgs, FileEntry, Hash, HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE};
+use backup_tool::{
+    chunks_ranges, compute_file_hash, configure_log, create_user_dir, index_files,
+    index_formatted_name, mutex_lock, BakOutputWriter, ChunkInfo, CliArgs, FileEntry, Hash,
+    HashReadWrapper, SplitInfo, ARGS, BACKUP_SIZE,
+};
 use clap::Parser;
 use log::info;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 use yeet_ops::yeet;
 
@@ -27,18 +31,26 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if args.ref_index.is_none() {
-        initial_backup()?;
-    } else {
-        differential_backup()?;
-    }
-
     let user_dir = create_user_dir(&args.source_dir)?;
-    fs::copy(args.out_dir.join("index.db"), user_dir.join(index_formatted_name()))?;
+    let ctx = Context {
+        index_db:user_dir.join(index_formatted_name()),
+    };
+
+    if args.ref_index.is_none() {
+        initial_backup(&ctx)?;
+    } else {
+        differential_backup(&ctx)?;
+    }
+    
+    fs::copy(&ctx.index_db, args.out_dir.join("index.db"))?;
     Ok(())
 }
 
-fn differential_backup() -> anyhow::Result<()> {
+struct Context {
+    index_db: PathBuf,
+}
+
+fn differential_backup(ctx: &Context) -> anyhow::Result<()> {
     // full scan is still needed
     info!("Indexing files...");
     let files = index_files(&mutex_lock!(ARGS).source_dir)?;
@@ -84,7 +96,7 @@ fn differential_backup() -> anyhow::Result<()> {
     let file_splits = write_bak_files(&out_dir, files_to_backup.iter().copied())?;
 
     info!("Creating index database...");
-    let mut db = IndexDb::new(out_dir.join("index.db"), true)?;
+    let mut db = IndexDb::new(&ctx.index_db, true)?;
     let db_tx = db.transaction()?;
     db_tx.insert_file_split_info(&file_splits)?;
     let new_files_ref_map = files_to_backup
@@ -124,7 +136,7 @@ fn differential_backup() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn initial_backup() -> anyhow::Result<()> {
+fn initial_backup(ctx: &Context) -> anyhow::Result<()> {
     // Do the first full backup
     info!("Indexing files...");
     let src_dir = mutex_lock!(ARGS).source_dir.clone();
@@ -146,8 +158,7 @@ fn initial_backup() -> anyhow::Result<()> {
     let file_splits = write_bak_files(&out_dir, unique_list.iter().map(|x| (*x.0, *x.1)))?;
 
     info!("Creating index database...");
-    let db_path = out_dir.join("index.db");
-    let mut db = IndexDb::new(&db_path, true)?;
+    let mut db = IndexDb::new(&ctx.index_db, true)?;
     let db_tx = db.transaction()?;
     for x in files.iter().zip(file_hash_list) {
         db_tx.insert_index_row(&IndexRow {
