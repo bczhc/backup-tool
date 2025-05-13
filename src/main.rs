@@ -90,7 +90,9 @@ fn differential_backup(ctx: &Context) -> anyhow::Result<()> {
     info!("Deduplicating diff by hash...");
     // if the diff file hash matches in the old file index, skip its backup
     let mut files_to_backup = Vec::new();
-    for e in remaining {
+    let remaining_count = remaining.len();
+    for (i, e) in remaining.into_iter().enumerate() {
+        info!("Hashing: [{}/{}] {}", i, remaining_count, e.path.display());
         let file_hash = compute_file_hash(e.full_path())?;
         if !old_index_hash_set.contains(&&*file_hash) {
             files_to_backup.push((file_hash, e));
@@ -158,7 +160,7 @@ fn initial_backup(ctx: &Context) -> anyhow::Result<()> {
     let mut file_hash_list = Vec::new();
     let mut unique_list = HashMap::new();
     for (i, e) in files.iter().enumerate() {
-        info!("[{}/{}] {}", i, file_count, e.path.display());
+        info!("Hashing: [{}/{}] {}", i, file_count, e.path.display());
         let hash = compute_file_hash(e.full_path())?;
         unique_list.insert(hash, e);
         file_hash_list.push(hash);
