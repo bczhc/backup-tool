@@ -100,10 +100,11 @@ fn differential_backup(ctx: &Context) -> anyhow::Result<()> {
             duplicates.push((e, file_hash));
         }
     }
+    files_to_backup.sort_by(|a, b| a.1.path.cmp(&b.1.path));
     info!("File count: {}", files_to_backup.len());
     assert_eq!(duplicates.len() + files_to_backup.len(), files.len());
 
-    info!("Writing backup files...");
+    info!("Writing to backup files...");
     let file_splits = write_bak_files(&out_dir, files_to_backup.iter().copied())?;
 
     info!("Creating index database...");
@@ -166,7 +167,10 @@ fn initial_backup(ctx: &Context) -> anyhow::Result<()> {
         file_hash_list.push(hash);
     }
     info!("Writing to backup files...");
-    let file_splits = write_bak_files(&out_dir, unique_list.iter().map(|x| (*x.0, *x.1)))?;
+
+    let mut files_to_backup = unique_list.iter().map(|x| (*x.0, *x.1)).collect::<Vec<_>>();
+    files_to_backup.sort_by(|a, b| a.1.path.cmp(&b.1.path));
+    let file_splits = write_bak_files(&out_dir, files_to_backup.into_iter())?;
 
     info!("Creating index database...");
     let mut db = IndexDb::new(&ctx.index_db, true)?;
